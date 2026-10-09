@@ -1,10 +1,11 @@
-
+```dockerfile
 FROM php:8.3-fpm-bookworm
 
 RUN apt-get update && apt-get install -y \
     nginx \
     git \
     unzip \
+    ca-certificates \
     libpng-dev \
     libjpeg62-turbo-dev \
     libfreetype6-dev \
@@ -13,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     default-mysql-client \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install pdo_mysql bcmath gd zip intl opcache \
+    && update-ca-certificates \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -37,3 +39,4 @@ RUN chmod +x /usr/local/bin/start.sh
 EXPOSE 10000
 
 CMD ["/usr/local/bin/start.sh"]
+```
