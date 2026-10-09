@@ -1,4 +1,3 @@
-```dockerfile
 FROM php:8.3-fpm-bookworm
 
 RUN apt-get update && apt-get install -y \
@@ -39,4 +38,3 @@ RUN chmod +x /usr/local/bin/start.sh
 EXPOSE 10000
 
 CMD ["/usr/local/bin/start.sh"]
-```
