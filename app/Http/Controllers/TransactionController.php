@@ -8,19 +8,14 @@ use App\Models\Transaction;
 use App\Models\Category;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class TransactionController extends Controller
 {
-    /**
-     * Display a listing of the resource.
-     * We'll return accounts with their transactions nested inside.
-     */
     public function index()
     {
         try {
-            // Get all accounts for the logged-in user and eager load their transactions,
-            // also loading the category for each transaction.
             $accounts = Auth::user()->accounts()->with(['transactions.category'])->get();
             return response()->json($accounts);
         } catch (\Exception $e) {
@@ -35,12 +30,8 @@ class TransactionController extends Controller
         return view('Transactions', compact('categories', 'accounts'));
     }
 
-    /**
-     * Store a newly created resource in storage.
-     */
     public function store(Request $request)
     {
-        // Ensure the account belongs to the authenticated user and get the account model
         $account = Account::where('id', $request->account_id)->where('user_id', Auth::id())->first();
 
         if (!$account) {
@@ -56,31 +47,25 @@ class TransactionController extends Controller
             'type' => 'required|string|in:income,expense',
         ]);
 
-        // --- NEW: Balance Check Logic ---
         if ($validate['type'] === 'expense' && $account->balance < $validate['amount']) {
-            // Return a specific error response if funds are insufficient
             return response()->json(['message' => 'Insufficient funds for this transaction.'], 422);
         }
 
-        $validate['user_id'] = Auth::id(); // Assign the user ID
-        $transaction = Transaction::create($validate);
+        return DB::transaction(function () use ($validate, $request, $account) {
+            $validate['user_id'] = Auth::id();
+            $transaction = Transaction::create($validate);
 
-        // Update account balance
-        if ($request->type === 'income') {
-            $account->balance += $request->amount;
-        } else {
-            $account->balance -= $request->amount;
-        }
-        $account->save();
+            if ($request->type === 'income') {
+                $account->increment('balance', $request->amount);
+            } else {
+                $account->decrement('balance', $request->amount);
+            }
 
-        // Reload with relations to send back to the frontend
-        $transaction->load(['category', 'account']);
-        return response()->json($transaction, 201);
+            $transaction->load(['category', 'account']);
+            return response()->json($transaction, 201);
+        });
     }
 
-    /**
-     * Display the specified resource.
-     */
     public function show($id)
     {
         $transaction = Transaction::with(['category', 'account'])->where('user_id', Auth::id())->find($id);
@@ -91,24 +76,13 @@ class TransactionController extends Controller
         return response()->json($transaction);
     }
 
-    /**
-     * Update the specified resource in storage.
-     */
     public function update(Request $request, string $id)
     {
         $transaction = Transaction::where('user_id', Auth::id())->find($id);
+        
         if (!$transaction) {
             return response()->json(['message' => 'Transaction not found'], 404);
         }
-
-        // Additional check for account ownership
-        if (!Account::where('id', $request->account_id)->where('user_id', Auth::id())->exists()) {
-            return response()->json(['error' => 'Invalid account'], 403);
-        }
-        
-        $originalAmount = $transaction->amount;
-        $originalType = $transaction->type;
-        $account = Account::find($transaction->account_id);
 
         $validate = $request->validate([
             'account_id' => 'required|exists:accounts,id',
@@ -118,49 +92,59 @@ class TransactionController extends Controller
             'date' => 'required|date',
             'type' => 'required|string|in:income,expense',
         ]);
-        
-        // Revert old transaction from balance
-        if ($originalType === 'income') {
-            $account->balance -= $originalAmount;
-        } else {
-            $account->balance += $originalAmount;
-        }
 
-        $transaction->update($validate);
+        return DB::transaction(function () use ($transaction, $validate, $request) {
+            // 1. Revert amount from the OLD account
+            $oldAccount = Account::find($transaction->account_id);
+            if ($oldAccount) {
+                if ($transaction->type === 'income') {
+                    $oldAccount->decrement('balance', $transaction->amount);
+                } else {
+                    $oldAccount->increment('balance', $transaction->amount);
+                }
+            }
 
-        // Apply new transaction to balance
-        if ($request->type === 'income') {
-            $account->balance += $request->amount;
-        } else {
-            $account->balance -= $request->amount;
-        }
-        $account->save();
+            // 2. Update the transaction with new data
+            $transaction->update($validate);
 
-        $transaction->load(['category', 'account']); // return relations
-        return response()->json($transaction, 200);
+            // 3. Apply the new amount to the NEW account
+            $newAccount = Account::where('id', $request->account_id)->where('user_id', Auth::id())->first();
+            if (!$newAccount) {
+                throw new \Exception('Invalid account target.');
+            }
+
+            if ($request->type === 'income') {
+                $newAccount->increment('balance', $request->amount);
+            } else {
+                $newAccount->decrement('balance', $request->amount);
+            }
+
+            $transaction->load(['category', 'account']);
+            return response()->json($transaction, 200);
+        });
     }
 
-    /**
-     * Remove the specified resource from storage.
-     */
     public function destroy(string $id)
     {
         $transaction = Transaction::where('user_id', Auth::id())->find($id);
+        
         if (!$transaction) {
             return response()->json(['message' => 'Transaction not found'], 404);
-        };
-        
-        // Adjust account balance before deleting
-        $account = Account::find($transaction->account_id);
-        if ($transaction->type === 'income') {
-            $account->balance -= $transaction->amount;
-        } else {
-            $account->balance += $transaction->amount;
         }
-        $account->save();
 
-        $transaction->delete();
-        return response()->json(['message' => 'Transaction deleted']);
+        return DB::transaction(function () use ($transaction) {
+            $account = Account::find($transaction->account_id);
+            
+            if ($account) {
+                if ($transaction->type === 'income') {
+                    $account->decrement('balance', $transaction->amount);
+                } else {
+                    $account->increment('balance', $transaction->amount);
+                }
+            }
+
+            $transaction->delete();
+            return response()->json(['message' => 'Transaction deleted']);
+        });
     }
 }
-
